@@ -1,0 +1,124 @@
+experiment:
+  name: iid_main_table
+  out_root: experiments/iid_main_table
+runtime:
+  screen: true
+  screen_name: iid_main_table
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  free_mem_mib: 6500
+  max_parallel: 4
+  poll_seconds: 30
+
+matrix:
+  case: [iid_cora, iid_pubmed, iid_cora_full, iid_dblp, iid_acm]
+  seed: [6222,8010,5908,8837]
+
+paths:
+  out_dir_template: "{out_root}/{case}/seed{seed}"
+  log_file_template: "{out_root}/logs/{case}_seed{seed}.log"
+  result_file: result.json
+  job_id_template: "{case}_seed{seed}"
+
+job:
+  entrypoint: scripts/exp_entry_point.py
+  args:
+    case: "{case}"
+    experiment_name: IID_MAIN_TABLE_DIRECTIONAL_ANCHOR
+    out_dir: "{out_dir}"
+    split_mode: stratified_2_1_1
+    device: cuda
+    seed: "{seed}"
+    epochs: 200
+    checkpoint_selection: best_val
+    warmup_epochs: 10
+    training_mask_mode: periodic_ste
+    mask_hardening_interval: 1
+    training_mask_hardening_mode: quantile_binary
+    backbone: gcn
+    num_gnn_layers: 2
+    hidden_dim: 32
+    graph_sparsity: 0.30
+    param_sparsity: 0.30
+    param_pruning_granularity: weight
+    param_policy_granularity: channel
+    use_hidden_coupling: true
+    hidden_coupling_mix_graph: 0.30
+    hidden_coupling_mix_param: 0.30
+    memory_rank: 8
+    graph_memory_layout: multi
+    param_memory_layout: multi
+    graph_score_init: topofeat
+    param_score_init: magnitude
+    lr: 0.05
+    weight_decay: 0.0005
+    sparsity_lambda: 0.08
+    hardening_mode: quantile_binary
+    deployment_graph_policy: full
+    latency_repeats: 1
+    latency_warmup: 0
+    include_dense_baseline: true
+    source_checkpoint_root: experiments/source_checkpoints
+    source_checkpoint_policy: off
+
+    tta_train_mask_ratio: 0.0
+    tta_train_shift_scope: train_mask
+    tta_adaptation_nodes: train
+    tta_epochs: 100
+    tta_log_every: 10
+    tta_checkpoint_selection: best_val
+    tta_strength_selection: best_val
+    tta_strength_candidates: [0.0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0]
+    tta_lr: 0.0005
+    tta_loss_mode: supervised
+    tta_lambda_logits: 1.0
+    tta_lambda_energy: 0.10
+    tta_energy_negative_mask_ratio: 0.0
+    tta_energy_clean_margin: 0.10
+    tta_lambda_consistency: 0.0
+    tta_consistency_mask_ratio: 0.0
+    tta_lambda_anchor: 0.0001
+    tta_lambda_teacher: 0.20
+    tta_lambda_entropy: 0.0
+    tta_lambda_state: 0.0
+    tta_state_mode: stateless
+    tta_affine_mode: direct
+    tta_gamma_a: 0.10
+    tta_gamma_b: 0.05
+    no_tta_logit_affine: true
+    no_tta_logit_residual: true
+    tta_output_mlp: true
+    tta_output_mlp_rank: 8
+    tta_gamma_output_mlp: 2.75
+    tta_output_gate_mode: signed
+    tta_center_delta_a: true
+    tta_normalize_delta_a: true
+    tta_center_delta_b: true
+    tta_normalize_delta_b: true
+    tta_delta_normalization_floor: 0.0001
+    tta_joint_energy_gate: true
+    tta_joint_energy_gate_train_min: 0.0
+    tta_gate_learn_mode: mean
+    tta_test_mode: energy_gated
+    energy_gate_mode: compatibility_rbf
+    energy_gate_min: 0.0
+    energy_gate_max: 1.0
+    energy_gate_center_z: 0.0005
+    energy_gate_temperature: 0.3
+    energy_gate_polarity: 1.0
+    no_tta_target_reset_controller: true
+    tta_target_adaptation_epochs: 0
+    tta_target_gate_scale: 1.0
+    tta_prediction_propagation: true
+    tta_propagation_mode: logspace_signed
+    tta_propagation_alpha_candidates: [-0.15, 0.0, 0.025]
+    tta_propagation_step_candidates: [1]
+    tta_propagation_label_anchor: true
+    tta_propagation_label_anchor_positive_only: true
+
+summary:
+  entrypoint: scripts/summarize_tta_seed_sweep.py
+  args:
+    root: "{out_root}"
+    baseline_csv: experiments/exp206_main_table_baselines_forward_flops_clean_211/main_table_acc_flops_ratio.csv
+    output: "{out_root}/seed_sweep_summary.csv"
+

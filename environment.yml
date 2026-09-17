@@ -1,0 +1,15 @@
+name: ougp
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - pytorch
+  - pip
+  - pip:
+      - pytest
+      - scikit-learn
+      - ogb
+      - torch-geometric
