@@ -44,8 +44,7 @@ def main():
 
             try:
                 df = pd.read_csv(csv_path)
-
-                # 添加来源信息
+                # add information source
                 df.insert(0, "dataset", dataset)
                 df.insert(1, "seed", seed)
 
