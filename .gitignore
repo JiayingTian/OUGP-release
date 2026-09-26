@@ -5,6 +5,3 @@ data/
 *.pt
 *.pth
 experiments/*
-!experiments/exp206_main_table_baselines_forward_flops_clean_211/
-experiments/exp206_main_table_baselines_forward_flops_clean_211/*
-!experiments/exp206_main_table_baselines_forward_flops_clean_211/main_table_acc_flops_ratio.csv

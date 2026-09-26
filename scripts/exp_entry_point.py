@@ -22,8 +22,9 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+for path in (PROJECT_ROOT, PROJECT_ROOT / "src", PROJECT_ROOT / "scripts"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from deployed_costs import (
     deployment_flops_metrics,
@@ -33,6 +34,7 @@ from deployed_costs import (
 from ougp.data import CitationGraph, apply_split_mode, load_graph_dataset
 from ougp.deployment import HARDENING_MODES, MaterializedGCNDeployment, deployment_mask_set, deployment_masks
 from ougp.tta import ensemble_log_probabilities, propagate_predictions
+from ougp.para_tta import adapt_parameter_mask
 from tta_energy_shift_probe import build_parser as build_exp121_parser
 from method_efficiency import (
     gated_controller,
@@ -85,7 +87,7 @@ def route_unified_case() -> None:
         raise ValueError("The unified OOD protocol exposes the energy-gated target path only.")
     command = [
         sys.executable,
-        str(Path(__file__).with_name("ood_citation_transfer.py")),
+        str(Path(__file__).with_name("run_ood_citation_para_tta.py")),
         *remaining,
         "--source-dataset", "dblp",
         "--target-dataset", "acm",
@@ -252,6 +254,16 @@ def main() -> None:
         choices=("standard_affine", "energy_gated"),
         default="standard_affine",
     )
+    parser.add_argument(
+        "--tta-protocol",
+        choices=("legacy_source_tta", "forward_only", "para_tta"),
+        default="legacy_source_tta",
+        help="Select the legacy, forward-only state+affine, or Para-TTA protocol.",
+    )
+    parser.add_argument("--para-tta-score-scale", type=float, default=0.50)
+    parser.add_argument("--para-tta-energy-gate", action="store_true", default=False)
+    parser.add_argument("--para-tta-gate-temperature", type=float, default=1.0)
+    parser.add_argument("--para-tta-eps", type=float, default=1e-6)
     args = parser.parse_args()
     if args.backbone != "gcn" or args.num_gnn_layers != 2:
         raise ValueError("The quantile-hardening experiment requires a 2-layer GCN.")
@@ -318,32 +330,90 @@ def main() -> None:
         for parameter in deployment.parameters():
             parameter.requires_grad_(False)
 
-    teacher_logits_override = None
-    if str(getattr(args, "tta_teacher_source", "ougp")) == "dense":
-        with torch.no_grad():
-            teacher_logits_override = dense_deployment(x).detach()
-    controller, source_energy, tta_training = train_exp121_controller(
-        args,
-        ougp_deployment,
-        x,
-        y,
-        train_mask,
-        val_mask,
-        teacher_logits_override=teacher_logits_override,
-    )
-    x_test = x
-    if args.tta_test_mode == "energy_gated":
-        test_controller, test_energy_gate = gated_controller(
-            controller, ougp_deployment, x_test, test_mask, source_energy, args
+    if args.tta_protocol == "forward_only":
+        if str(args.tta_state_mode) != "full":
+            raise ValueError("forward_only TTA requires --tta-state-mode full.")
+        if str(args.tta_affine_mode) != "readout":
+            raise ValueError("forward_only TTA requires --tta-affine-mode readout.")
+        if bool(getattr(args, "tta_output_mlp", False)):
+            raise ValueError("forward_only TTA requires --no-tta-output-mlp.")
+        if bool(getattr(args, "tta_prediction_propagation", False)):
+            raise ValueError("forward_only TTA requires --no-tta-prediction-propagation.")
+
+    para_tta_result = None
+    para_deployment = None
+    if args.tta_protocol == "para_tta":
+        # Compare full source and target feature distributions without labels or masks.
+        para_tta_result = adapt_parameter_mask(
+            ougp_model,
+            source_param_mask=deployment_parameter_values,
+            source_x=x,
+            target_x=x,
+            source_node_mask=None,
+            target_node_mask=None,
+            score_scale=args.para_tta_score_scale,
+            energy_gate=args.para_tta_energy_gate,
+            gate_temperature=args.para_tta_gate_temperature,
+            eps=args.para_tta_eps,
         )
-        tta_label = "stateless energy-gated affine TTA"
+        para_deployment = MaterializedGCNDeployment(
+            ougp_model,
+            deployment_graph_values,
+            para_tta_result.param_mask,
+            x.dtype,
+            graph_support=deployment_graph_support,
+            param_support=para_tta_result.param_mask.detach().bool(),
+        ).to(device)
+        para_deployment.eval()
+        for parameter in para_deployment.parameters():
+            parameter.requires_grad_(False)
+        controller = None
+        source_energy = {}
+        tta_training = {
+            "protocol": "para-tta-forward-only",
+            "target_optimizer_steps": 0,
+            "target_training": False,
+            "tta_training_flops": 0.0,
+            "tta_training_epochs": 0.0,
+        }
+        x_test = x
+        tta_stats_mask = None
+        test_controller = None
+        test_energy_gate = 0.0
+        test_energy_gate_stats = {}
+        tta_label = "para-TTA energy-conditioned parameter-mask"
     else:
-        controller.reset_affine_strength()
-        test_controller = controller
-        test_energy_gate = 1.0
-        tta_label = "stateless direct affine TTA"
-    test_controller.eval()
-    test_energy_gate_stats = test_controller.affine_strength_stats()
+        teacher_logits_override = None
+        if str(getattr(args, "tta_teacher_source", "ougp")) == "dense":
+            with torch.no_grad():
+                teacher_logits_override = dense_deployment(x).detach()
+        controller, source_energy, tta_training = train_exp121_controller(
+            args,
+            ougp_deployment,
+            x,
+            y,
+            train_mask,
+            val_mask,
+            teacher_logits_override=teacher_logits_override,
+        )
+        x_test = x
+        tta_stats_mask = train_mask if args.tta_protocol == "forward_only" else test_mask
+        if args.tta_test_mode == "energy_gated":
+            test_controller, test_energy_gate = gated_controller(
+                controller, ougp_deployment, x_test, tta_stats_mask, source_energy, args
+            )
+            tta_label = (
+                "forward-only energy-gated state+affine TTA"
+                if args.tta_protocol == "forward_only"
+                else "stateless energy-gated affine TTA"
+            )
+        else:
+            controller.reset_affine_strength()
+            test_controller = controller
+            test_energy_gate = 1.0
+            tta_label = "stateless direct affine TTA"
+        test_controller.eval()
+        test_energy_gate_stats = test_controller.affine_strength_stats()
 
     @torch.no_grad()
     def dense_forward():
@@ -364,21 +434,33 @@ def main() -> None:
 
     @torch.no_grad()
     def tta_forward():
+        if args.tta_protocol == "para_tta":
+            return para_deployment(x_test)
         runtime_controller = test_controller
         if args.tta_test_mode == "energy_gated":
             runtime_controller, _ = gated_controller(
                 controller,
                 ougp_deployment,
                 x_test,
-                test_mask,
+                tta_stats_mask,
                 source_energy,
                 args,
             )
             runtime_controller.eval()
-        logits = ougp_deployment.forward_with_stateless_direct_tta(
-            x_test,
-            runtime_controller,
-        )
+        if args.tta_protocol == "forward_only":
+            runtime_controller.reset_state()
+            logits = runtime_controller.test_time_forward(
+                ougp_deployment,
+                x_test,
+                stats_node_mask=tta_stats_mask,
+                update_state=True,
+                return_hidden_states=False,
+            )
+        else:
+            logits = ougp_deployment.forward_with_stateless_direct_tta(
+                x_test,
+                runtime_controller,
+            )
         if bool(propagation_runtime["enabled"]):
             components = list(propagation_runtime["components"])
             logits = ensemble_log_probabilities(
@@ -582,11 +664,15 @@ def main() -> None:
             hidden_layers=ougp_deployment.hidden_layer_count,
             flops_reduction_source=f"{args.hardening_mode} graph support and hidden channels",
         )
-    tta_elementwise_ops = float(
-        2
-        * dataset.num_nodes
-        * ougp_deployment.materialized_channel_count
-        * ougp_deployment.hidden_layer_count
+    tta_elementwise_ops = (
+        0.0
+        if args.tta_protocol == "para_tta"
+        else float(
+            2
+            * dataset.num_nodes
+            * ougp_deployment.materialized_channel_count
+            * ougp_deployment.hidden_layer_count
+        )
     )
     gate_probe_flops = (
         float(ougp_cost["deployed_flops"])
@@ -613,7 +699,7 @@ def main() -> None:
         else 0.0
     )
     output_mlp_flops = 0.0
-    if bool(getattr(args, "tta_output_mlp", False)):
+    if args.tta_protocol != "para_tta" and bool(getattr(args, "tta_output_mlp", False)):
         output_mlp_flops = float(
             4
             * dataset.num_nodes
@@ -703,9 +789,16 @@ def main() -> None:
     # Preserve the conventional one-output-forward metric used by pruning tables.
     tta_cost["deployed_flops"] = output_forward_flops
     tta_cost["flops_reduction"] = 1.0 - output_forward_flops / dense_reference_flops
-    tta_cost["flops_reduction_source"] = (
-        f"single adapted output forward: {args.hardening_mode} compact backbone, fixed self-loops, stateless affine, logit correction, and prediction propagation"
-    )
+    if args.tta_protocol == "para_tta":
+        tta_cost["flops_reduction_source"] = (
+            f"single Para-TTA output forward: {args.hardening_mode} compact backbone, "
+            "fixed self-loops, forward-only parameter-mask selection"
+        )
+    else:
+        tta_cost["flops_reduction_source"] = (
+            f"single adapted output forward: {args.hardening_mode} compact backbone, fixed self-loops, "
+            "stateless affine, logit correction, and prediction propagation"
+        )
 
     dense_training = source_training_flops(
         history=dense_source_history,
@@ -734,11 +827,18 @@ def main() -> None:
         variant="ougp",
         hidden_coupling_interval=args.hidden_coupling_interval,
     )
-    tta_training = tta_training_flops(
-        args=vars(args),
-        compact_forward_flops=float(ougp_cost["deployed_flops"]),
-        adapted_forward_flops=adapted_forward_flops,
-    )
+    if args.tta_protocol == "para_tta":
+        tta_training = {
+            "tta_training_flops": 0.0,
+            "tta_training_epochs": 0.0,
+            "training_flops_scope": "source OUGP training only; Para-TTA is forward-only",
+        }
+    else:
+        tta_training = tta_training_flops(
+            args=vars(args),
+            compact_forward_flops=float(ougp_cost["deployed_flops"]),
+            adapted_forward_flops=adapted_forward_flops,
+        )
     dense_training_total = float(dense_training["source_training_flops"])
     ougp_training_total = float(ougp_training["source_training_flops"])
     tta_training_total = ougp_training_total + float(tta_training["tta_training_flops"])
@@ -764,7 +864,11 @@ def main() -> None:
             **tta_training,
             "training_flops": tta_training_total,
             "training_flops_ratio": tta_training_total / max(dense_training_total, 1.0),
-            "training_flops_scope": "OUGP source training + TTA optimization; excludes validation/test/deployment",
+            "training_flops_scope": (
+                "OUGP source training + forward-only Para-TTA mask selection; excludes validation/test/deployment"
+                if args.tta_protocol == "para_tta"
+                else "OUGP source training + TTA optimization; excludes validation/test/deployment"
+            ),
         },
     )
 
@@ -831,11 +935,30 @@ def main() -> None:
             **retained_stats(deployment_parameter_values, deployment_parameter_support, "parameter"),
         },
         "test_feature_mask_ratio": 0.0,
-        "tta_test_mode": "original_exp170_stateless_affine",
+        "tta_test_mode": tta_label,
         "tta_test_protocol": args.tta_test_mode,
+        "tta_protocol": args.tta_protocol,
+        "tta_gate_scope": (
+            "target_input_feature_energy" if args.tta_protocol == "para_tta"
+            else "train_mask" if args.tta_protocol == "forward_only" else "test_mask"
+        ),
+        "tta_interface": (
+            "para_tta_forward_mask" if args.tta_protocol == "para_tta"
+            else "test_time_forward" if args.tta_protocol == "forward_only"
+            else "forward_with_stateless_direct_tta"
+        ),
+        "source_controller_pretraining": args.tta_protocol == "forward_only",
+        "target_tta_training": False if args.tta_protocol in {"forward_only", "para_tta"} else None,
+        "tta_training_scope": (
+            "none_forward_only_mask_selection" if args.tta_protocol == "para_tta"
+            else "source_controller_pretraining" if args.tta_protocol == "forward_only"
+            else "legacy_controller_training"
+        ),
         "tta_test_energy_gate": test_energy_gate,
         "tta_test_energy_gate_stats": test_energy_gate_stats,
-        "tta_selected_gate_scale": controller.selected_gate_scale,
+        "tta_selected_gate_scale": (
+            controller.selected_gate_scale if controller is not None else 0.0
+        ),
         "tta_gate_learn_mode": args.tta_gate_learn_mode,
         "tta_teacher_source": args.tta_teacher_source,
         "tta_energy_clean_margin": args.tta_energy_clean_margin,
@@ -845,8 +968,15 @@ def main() -> None:
         "ougp_source_result": ougp_source,
         "tta_training_summary": tta_training,
         "prediction_propagation_summary": propagation_summary,
+        "para_tta_summary": para_tta_result.summary() if para_tta_result is not None else None,
+        "para_tta_energy_gate": bool(args.para_tta_energy_gate) if args.tta_protocol == "para_tta" else None,
+        "para_tta_gate_scope": "target_only" if args.tta_protocol == "para_tta" else None,
         "rows": rows,
     }
+    if para_tta_result is not None:
+        (out_dir / "para_tta_diagnostics.json").write_text(
+            json.dumps(para_tta_result.diagnostics(), indent=2) + "\n", encoding="utf-8"
+        )
     (out_dir / "result.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     write_rows(out_dir / "results.csv", rows)
     print(json.dumps(payload, indent=2), flush=True)

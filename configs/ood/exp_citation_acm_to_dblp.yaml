@@ -1,9 +1,10 @@
 experiment:
-  name: exp271_ood_245_citation_acm_to_dblp
-  out_root: experiments/ood/citation_acm_to_dblp
+  name: release_ood_citation_acm_to_dblp_para_tta
+  out_root: experiments/ood/citation_acm_to_dblp_para_tta
 
 runtime:
-  screen: false
+  screen: true
+  screen_name: release_citation_acm_to_dblp_para_tta
   gpus: [0, 1, 2, 3, 4, 5, 6, 7]
   free_mem_mib: 6500
   max_parallel: 1
@@ -19,9 +20,9 @@ paths:
   job_id_template: citation_acm_to_dblp_seed{seed}
 
 job:
-  entrypoint: scripts/ood_citation_transfer.py
+  entrypoint: scripts/run_ood_citation_para_tta.py
   args:
-    experiment_name: EXP271_OOD_245_ACMV9_TO_DBLPV8
+    experiment_name: RELEASE_OOD_ACMV9_TO_DBLPV8_PARA_TTA
     out_dir: "{out_dir}"
     source_dataset: acm
     target_dataset: dblp
@@ -58,57 +59,12 @@ job:
     source_checkpoint_policy: off
     profile_inference_repeats: 0
     profile_warmup: 0
-    tta_train_mask_ratio: 0.0
-    tta_train_shift_scope: train_mask
-    # tta_adaptation_nodes: train_val
-    tta_adaptation_nodes: train
-    tta_epochs: 100
-    tta_log_every: 10
-    tta_checkpoint_selection: best_val
-    tta_strength_selection: best_val
-    tta_strength_candidates: [0.0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0]
-    tta_lr: 0.0005
-    tta_loss_mode: supervised
-    tta_lambda_logits: 1.0
-    tta_lambda_energy: 0.10
-    tta_energy_negative_mask_ratio: 0.0
-    tta_energy_clean_margin: 0.10
-    tta_lambda_consistency: 0.0
-    tta_consistency_mask_ratio: 0.0
-    tta_lambda_anchor: 0.0001
-    tta_lambda_teacher: 0.20
-    tta_lambda_entropy: 0.0
-    tta_lambda_state: 0.0
-    tta_state_mode: stateless
-    tta_affine_mode: direct
-    tta_gamma_a: 0.10
-    tta_gamma_b: 0.05
-    no_tta_logit_affine: true
-    no_tta_logit_residual: true
-    tta_output_mlp: true
-    tta_output_mlp_rank: 8
-    tta_gamma_output_mlp: 2.75
-    tta_output_gate_mode: signed
-    tta_center_delta_a: true
-    tta_normalize_delta_a: true
-    tta_center_delta_b: true
-    tta_normalize_delta_b: true
-    tta_delta_normalization_floor: 0.0001
-    tta_joint_energy_gate: true
-    tta_joint_energy_gate_train_min: 0.0
-    tta_gate_learn_mode: mean
-    energy_gate_mode: compatibility_rbf
-    energy_gate_min: 0.0
-    energy_gate_max: 1.0
-    energy_gate_center_z: 0.0005
-    energy_gate_temperature: 0.3
-    energy_gate_polarity: 1.0
-    no_tta_target_reset_controller: true
+    tta_protocol: para_tta
+    para_tta_score_scale: 0.50
+    para_tta_energy_gate: true
+    para_tta_gate_temperature: 1.0
+    para_tta_eps: 1e-6
+    tta_epochs: 0
     tta_target_adaptation_epochs: 0
-    tta_target_gate_scale: 1.0
-    tta_prediction_propagation: true
-    tta_propagation_mode: logspace_signed
-    tta_propagation_alpha_candidates: [-0.15, 0.0, 0.025]
-    tta_propagation_step_candidates: [1]
-    tta_propagation_label_anchor: true
-    tta_propagation_label_anchor_positive_only: true
+    tta_output_mlp: false
+    tta_prediction_propagation: false

@@ -1,10 +1,20 @@
-# OUGP + TTA IID
+# OUGP Release: IID and OOD Para-TTA
 
-This README covers the five-case IID experiment only. Its configuration is
-`configs/iid/exp_iid_main_table.yaml`. The matrix contains
-Cora, PubMed, Cora Full, DBLP, and ACM with four seeds each. Pre-existing OOD
-files in this working directory are not used by this command. Raw datasets and
-model checkpoints are not included.
+This release keeps the OUGP source-side training and deployment path unchanged.
+The default TTA path is forward-only ESPM (Energy-Shift Parameter Mask): it
+measures target feature channel energy, computes a channel-wise shift, and
+re-ranks a fixed-budget parameter mask. It does not use target labels,
+loss, backward, optimizer steps, controller training, output MLP, or prediction
+propagation. The pruning budget is preserved. IID disables the energy gate; OOD disables it for source deployment and enables it only for target ESPM mask re-ranking.
+
+The release includes these entry configurations:
+
+- `configs/iid/exp_iid_main_table.yaml`: Cora, PubMed, Cora Full, DBLP, and ACM.
+- `configs/ood/exp_citation_dblp_to_acm.yaml`: DBLPv8 to ACMv9.
+- `configs/ood/exp_citation_acm_to_dblp.yaml`: ACMv9 to DBLPv8.
+
+Raw datasets and model checkpoints are not included. All paths are relative to
+the release root; no personal home-directory paths are required.
 
 ## Environment
 
@@ -32,6 +42,12 @@ Use paths relative to the release root. No dataset files are shipped.
 - ACM: PyTorch Geometric `HGBDataset` downloads and processes it under
   `data/raw/hgb/` on first use. The OUGP loader selects the labeled node type
   and its within-type citation edges.
+- Citation OOD: place the UDAGCN DBLPv8 and ACMv9 raw files under
+  `data/raw/udagcn/` using the directory names expected by the citation
+  loader. These files are not downloaded by the release launcher.
+- Twitch OOD: place the Twitch domain files under the configured relative data
+  root before launching the matrix. The release launcher does not copy data
+  from another checkout.
 
 The experiment entrypoint applies the configured `stratified_2_1_1` split.
 First use requires network access; for offline runs, populate those same cache
@@ -43,11 +59,14 @@ personal home-directory path.
 
 ```bash
 bash scripts/launch_exp.sh configs/iid/exp_iid_main_table.yaml
+bash scripts/launch_exp.sh configs/ood/exp_citation_dblp_to_acm.yaml
+bash scripts/launch_exp.sh configs/ood/exp_citation_acm_to_dblp.yaml
+bash scripts/launch_exp.sh configs/ood/exp_twitch_espm.yaml
 ```
 
-The output root is `experiments/iid_main_table/`. The summary command
-also reads the included baseline table at
-`experiments/exp206_main_table_baselines_forward_flops_clean_211/main_table_acc_flops_ratio.csv`.
+Use `--dry-run` after a configuration to inspect the generated commands without
+starting jobs. Outputs are written below the experiment root declared by each
+configuration.
 
-The IID launcher does not wait for OOD-only data. The summary script includes
-baseline columns for all five IID datasets.
+For reproducible launches, set `PYTHON_BIN` explicitly to the intended
+environment and keep each configuration's seed list unchanged.
